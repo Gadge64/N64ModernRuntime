@@ -2,6 +2,9 @@
 #include <fstream>
 #include <ultramodern/ultramodern.hpp>
 #include "recomp.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" void osSpTaskLoad_recomp(uint8_t* rdram, recomp_context* ctx) {
     // Nothing to do here
@@ -10,8 +13,13 @@ extern "C" void osSpTaskLoad_recomp(uint8_t* rdram, recomp_context* ctx) {
 bool dump_frame = false;
 
 extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
-    //printf("[sp] osSpTaskStartGo(0x%08X)\n", (uint32_t)ctx->r4);
     OSTask* task = TO_PTR(OSTask, ctx->r4);
+    // [wcw] running totals every 64 tasks so a stall's task mix is visible late in a run
+    {
+        static int nGfx = 0, nAud = 0, nAll = 0;
+        if (task->t.type == M_GFXTASK) nGfx++; else if (task->t.type == M_AUDTASK) nAud++;
+        if ((nAll++ % 64) == 0) fprintf(stderr, "[wcw][sp] task totals: gfx=%d aud=%d\n", nGfx, nAud);
+    }
     if (task->t.type == M_GFXTASK) {
         //printf("[sp] Gfx task: %08X\n", (uint32_t)ctx->r4);
     } else if (task->t.type == M_AUDTASK) {

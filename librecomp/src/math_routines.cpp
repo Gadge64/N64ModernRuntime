@@ -112,3 +112,35 @@ extern "C" void __ll_lshift_recomp(uint8_t * rdram, recomp_context * ctx) {
     ctx->r2 = (int32_t)(ret >> 32);
     ctx->r3 = (int32_t)(ret >> 0);
 }
+
+// [wcw] The remaining IDO softfloat conversions used by WCW (math_routines didn't ship these
+// four). N64Recomp can't emit trunc.l.*/cvt.*.l, so the game's func_XXXX are named to these in
+// tools/gen_symbols.py and routed here. FP arg in f12, int64 result in r2(hi)/r3(lo) and vice
+// versa, matching the existing helpers above.
+extern "C" void __d_to_ll_recomp(uint8_t * rdram, recomp_context * ctx) {
+    int64_t ret = (int64_t)ctx->f12.d;
+
+    ctx->r2 = (int32_t)(ret >> 32);
+    ctx->r3 = (int32_t)(ret >> 0);
+}
+
+extern "C" void __d_to_ull_recomp(uint8_t * rdram, recomp_context * ctx) {
+    uint64_t ret = (uint64_t)ctx->f12.d;
+
+    ctx->r2 = (int32_t)(ret >> 32);
+    ctx->r3 = (int32_t)(ret >> 0);
+}
+
+extern "C" void __f_to_ull_recomp(uint8_t * rdram, recomp_context * ctx) {
+    uint64_t ret = (uint64_t)ctx->f12.fl;
+
+    ctx->r2 = (int32_t)(ret >> 32);
+    ctx->r3 = (int32_t)(ret >> 0);
+}
+
+extern "C" void __ll_to_d_recomp(uint8_t * rdram, recomp_context * ctx) {
+    int64_t a = (ctx->r4 << 32) | ((ctx->r5 << 0) & 0xFFFFFFFFu);
+    double ret = (double)a;
+
+    ctx->f0.d = ret;
+}

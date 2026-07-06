@@ -16,12 +16,15 @@ extern "C" void osAiSetFrequency_recomp(uint8_t* rdram, recomp_context* ctx) {
 }
 
 extern "C" void osAiSetNextBuffer_recomp(uint8_t* rdram, recomp_context* ctx) {
+    // [wcw] totals every 64 calls to see whether the audio driver still feeds buffers late in a run
+    { static int n = 0; if ((n++ % 64) == 0) fprintf(stderr, "[wcw][ai] osAiSetNextBuffer #%d len=0x%X\n", n - 1, (unsigned)ctx->r5); }
     ultramodern::queue_audio_buffer(rdram, ctx->r4, ctx->r5);
     ctx->r2 = 0;
 }
 
 extern "C" void osAiGetLength_recomp(uint8_t* rdram, recomp_context* ctx) {
     ctx->r2 = ultramodern::get_remaining_audio_bytes();
+    { static int n = 0; if ((n++ % 256) == 0) fprintf(stderr, "[wcw][ai] osAiGetLength #%d -> 0x%X\n", n - 1, (unsigned)ctx->r2); }
 }
 
 extern "C" void osAiGetStatus_recomp(uint8_t* rdram, recomp_context* ctx) {

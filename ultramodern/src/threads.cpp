@@ -185,6 +185,8 @@ void ultramodern::resume_thread_and_wait(RDRAM_ARG OSThread *t) {
 static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entrypoint, PTR(void) arg, UltraThreadContext* thread_context) {
     OSThread *self = TO_PTR(OSThread, self_);
     debug_printf("[Thread] Thread created: %d\n", self->id);
+    // [wcw] map game thread ids to their entry PCs (to identify threads in traces)
+    fprintf(stderr, "[wcw][thread] id=%d entry=0x%08X pri=%d\n", self->id, (unsigned)(uint32_t)entrypoint, self->priority);
     thread_self = self_;
     is_game_thread = true;
 

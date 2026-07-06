@@ -29,6 +29,7 @@ struct SpTaskAction {
 };
 
 struct ScreenUpdateAction {
+    double wcw_enqueue_ms; // [wcw] DIAGNOSTIC: set at VI-thread enqueue for latency measurement
     ultramodern::renderer::ViRegs regs;
 };
 
@@ -72,6 +73,11 @@ static struct {
         void update_vi() {
             ViState* next_state = get_next_state();
             const OSViMode* next_mode = next_state->mode;
+            if (next_mode == nullptr) {
+                static bool warned = false;
+                if (!warned) { warned = true; fprintf(stderr, "[wcw][vi] update_vi: next_state->mode is NULL (cur_state=%d field=%d game_started=%d) - skipping\n", cur_state, field, (int)ultramodern::is_game_started()); }
+                return;
+            }
             const OSViCommonRegs* common_regs = &next_mode->comRegs;
             const OSViFieldRegs* field_regs = &next_mode->fldRegs[field];
             PTR(void) framebuffer = osVirtualToPhysical(next_state->framebuffer);
@@ -91,6 +97,19 @@ static struct {
 
             // TODO implement osViFade
 
+            { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): trace the ViState dance per tick.
+                static const bool wcwTlog = getenv("WCW_PRESENT_LUM") != nullptr;
+                if (wcwTlog) {
+                    static FILE *tf = nullptr;
+                    if (tf == nullptr) tf = fopen("wcw_vistate_log.csv", "w");
+                    if (tf != nullptr) {
+                        double ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+                        fprintf(tf, "%.1f,%d,0x%X,0x%X,0x%X\n", ms, cur_state,
+                            (unsigned)states[0].framebuffer, (unsigned)states[1].framebuffer, (unsigned)origin);
+                        fflush(tf);
+                    }
+                }
+            }
             // Update VI registers.
             regs.VI_ORIGIN_REG = origin;
             regs.VI_WIDTH_REG = common_regs->width;
@@ -143,6 +162,7 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
 
 extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_, OSMesg msg) {
     std::lock_guard lock{ events_context.message_mutex };
+    fprintf(stderr, "[wcw][osSetEventMesg] event=%d mq=0x%X msg=0x%X\n", (int)event_id, (unsigned)mq_, (unsigned)msg);
 
     switch (event_id) {
         case OS_EVENT_SP:
@@ -165,10 +185,21 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
 
 extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 retrace_count) {
     std::lock_guard lock{ events_context.message_mutex };
+    // [wcw fix] the retrace event registration is global on real hardware (latest osViSetEvent
+    // wins), but the ViStates here are double-buffered and never copy to each other — writing
+    // only next_state leaves the stale registration live on the other parity. WCW re-registers
+    // its retrace (new mq/msg/rate) at the end of its attract sequence; the stale parity then
+    // starved the new one via the shared remaining_retraces counter and the game deadlocked.
     ViState* next_state = events_context.vi.get_next_state();
     next_state->mq = mq_;
     next_state->msg = msg;
     next_state->retrace_count = retrace_count;
+    ViState* cur_state = events_context.vi.get_cur_state();
+    cur_state->mq = mq_;
+    cur_state->msg = msg;
+    cur_state->retrace_count = retrace_count;
+    fprintf(stderr, "[wcw][osViSetEvent] mq=0x%X msg=0x%X retrace_count=%u\n",
+        (unsigned)(uint32_t)mq_, (unsigned)(uint32_t)msg, retrace_count);
 }
 
 uint64_t total_vis = 0;
@@ -224,10 +255,36 @@ void vi_thread_func() {
 
         // Queue a screen update for the graphics thread with the current VI register state.
         // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
-        events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+        events_context.action_queue.enqueue(ScreenUpdateAction{
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0,
+            events_context.vi.regs });
 
         // Update VI registers and swap VI modes.
         events_context.vi.update_vi();
+
+        { // [wcw] DIAGNOSTIC: scanout health — log origin changes (framebuffer cycling
+          // pattern) and black scanouts (hStart==0 = VI_STATE_BLACK), to characterize
+          // visual flicker. First ~200 origin changes logged individually + 1/s summary.
+            static uint32_t last_origin = 0xFFFFFFFF; static int vis = 0, changes = 0, blacks = 0, logged = 0;
+            uint32_t org = events_context.vi.regs.VI_ORIGIN_REG;
+            uint32_t hs = events_context.vi.regs.VI_H_START_REG;
+            vis++;
+            if (hs == 0) blacks++;
+            if (org != last_origin) {
+                changes++;
+                if (logged < 200) { fprintf(stderr, "[wcw][scan] vi=%llu origin 0x%08X -> 0x%08X hstart=0x%X\n", (unsigned long long)total_vis, last_origin, org, hs); logged++; }
+                last_origin = org;
+            }
+            if (vis >= 60) {
+                extern std::atomic_int wcw_ai_del, wcw_ai_drop, wcw_vi_del, wcw_vi_drop;
+                extern std::atomic<int64_t> wcw_ai_maxlat, wcw_vi_maxlat;
+                fprintf(stderr, "[wcw][scan] 60 VIs: origin-changes=%d blacks=%d | ai del=%d drop=%d maxlat=%lldms | vi del=%d drop=%d maxlat=%lldms\n",
+                    changes, blacks,
+                    wcw_ai_del.exchange(0), wcw_ai_drop.exchange(0), (long long)wcw_ai_maxlat.exchange(0),
+                    wcw_vi_del.exchange(0), wcw_vi_drop.exchange(0), (long long)wcw_vi_maxlat.exchange(0));
+                vis = 0; changes = 0; blacks = 0;
+            }
+        }
 
         // If the game has started, handle sending VI and AI events.
         if (ultramodern::is_game_started()) {
@@ -235,16 +292,52 @@ void vi_thread_func() {
             
             std::lock_guard lock{ events_context.message_mutex };
             ViState* cur_state = events_context.vi.get_cur_state();
-            if (remaining_retraces == 0) {
+            { // [wcw] DIAGNOSTIC: report VI/AI retrace-queue registration once a second, plus the
+              // fixed-segment game-mode state var @ 0x80034834 (0=overlay A, 1=overlay B — it
+              // advances 0->1 when B loads then sticks, i.e. the overlay-B internal state is the
+              // stall). Read from rdram with the recomp byte-swap (byte at game offset X = rdram[X^3]).
+                static int tick = 0;
+                if ((tick++ % 60) == 0) {
+                    uint8_t* rd = events_context.rdram;
+                    auto rd32 = [rd](uint32_t off) -> uint32_t {
+                        return ((uint32_t)rd[(off+0)^3] << 24) | ((uint32_t)rd[(off+1)^3] << 16)
+                             | ((uint32_t)rd[(off+2)^3] << 8)  | ((uint32_t)rd[(off+3)^3]);
+                    };
+                    extern std::atomic_int wcw_spb_delivered, wcw_spb_full, wcw_dpc_delivered, wcw_dpc_full;
+                    extern std::atomic_int wcw_spc_calls, wcw_dpc_calls;
+                    fprintf(stderr, "[wcw][vi] tick %d: gamemode=0x%X fb=0x%08X | state=0x%X hstart=0x%X origin=0x%X dpc=%d | vimq=0x%X vimsg=0x%X rc=%d aimq=0x%X\n",
+                        tick, rd32(0x34834), (unsigned)cur_state->framebuffer,
+                        cur_state->state, events_context.vi.regs.VI_H_START_REG, events_context.vi.regs.VI_ORIGIN_REG,
+                        wcw_dpc_calls.load(),
+                        (unsigned)cur_state->mq, (unsigned)cur_state->msg, cur_state->retrace_count,
+                        (unsigned)events_context.ai.mq);
+                }
+            }
+            // [wcw fix] was `== 0` with an unclamped reload: if cur_state->retrace_count ever reads
+            // 0 once (e.g. mid VI-state swap during a mode change / osViBlack fade), the counter
+            // reloads to 0, goes negative, and `== 0` never fires again — retrace events stop
+            // permanently and every game thread eventually starves (frozen game, live process).
+            // WCW hit this deterministically at the end of its attract sequence.
+            if (remaining_retraces <= 0) {
                 if (cur_state->mq != NULLPTR) {
                     // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
-                    // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next. 
+                    // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next.
+                    { // [wcw] DIAGNOSTIC: stamp enqueue time for delivery-latency measurement (see mesgqueue.cpp)
+                        extern std::atomic<uint32_t> wcw_vi_mq; extern std::atomic<int64_t> wcw_vi_enq_ms;
+                        wcw_vi_mq.store((uint32_t)cur_state->mq);
+                        wcw_vi_enq_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                    }
                     ultramodern::enqueue_external_message(cur_state->mq, cur_state->msg, false, false);
                 }
-                remaining_retraces = cur_state->retrace_count;
+                remaining_retraces = (cur_state->retrace_count > 0) ? cur_state->retrace_count : 1;
             }
             if (events_context.ai.mq != NULLPTR) {
                 // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
+                { // [wcw] DIAGNOSTIC: stamp enqueue time for delivery-latency measurement (see mesgqueue.cpp)
+                    extern std::atomic<uint32_t> wcw_ai_mq; extern std::atomic<int64_t> wcw_ai_enq_ms;
+                    wcw_ai_mq.store((uint32_t)events_context.ai.mq);
+                    wcw_ai_enq_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                }
                 ultramodern::enqueue_external_message(events_context.ai.mq, events_context.ai.msg, false, false);
             }
         }
@@ -255,15 +348,20 @@ void vi_thread_func() {
     }
 }
 
+// [wcw] DIAGNOSTIC counters: completion-message accounting (find where SP/DP dones get lost).
+std::atomic_int wcw_spc_calls{0}, wcw_dpc_calls{0};
+
 void sp_complete() {
     uint8_t* rdram = events_context.rdram;
     std::lock_guard lock{ events_context.message_mutex };
+    wcw_spc_calls.fetch_add(1);
     ultramodern::enqueue_external_message(events_context.sp.mq, events_context.sp.msg, false, true);
 }
 
 void dp_complete() {
     uint8_t* rdram = events_context.rdram;
     std::lock_guard lock{ events_context.message_mutex };
+    wcw_dpc_calls.fetch_add(1);
     ultramodern::enqueue_external_message(events_context.dp.mq, events_context.dp.msg, false, true);
 }
 
@@ -355,8 +453,35 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
 
     while (!exited) {
         // Try to pull an action from the queue
-        Action action;
-        if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
+        Action first_action;
+        if (events_context.action_queue.wait_dequeue_timed(first_action, 1ms)) {
+            // [wcw fix] Drain the whole queue and drop STALE ScreenUpdateActions (keep only the
+            // newest). Each ScreenUpdateAction is a snapshot of the VI regs at one 60Hz tick; a
+            // standing backlog in this queue (SpTask display-list processing shares the thread)
+            // otherwise delays scanout by that backlog — measured at 5-6 VIs (~90ms), enough that
+            // the presented framebuffer overlapped the game re-clearing/redrawing it for its NEXT
+            // frame -> 1 of 3 presents was pure black (constant visible flicker). Presenting only
+            // the freshest VI snapshot bounds scanout latency to ~1 action regardless of backlog.
+            thread_local std::vector<Action> action_batch;
+            action_batch.clear();
+            action_batch.push_back(std::move(first_action));
+            {
+                Action extra;
+                while (events_context.action_queue.try_dequeue(extra)) {
+                    action_batch.push_back(std::move(extra));
+                }
+            }
+            size_t last_screen_update = SIZE_MAX;
+            for (size_t i = 0; i < action_batch.size(); i++) {
+                if (std::get_if<ScreenUpdateAction>(&action_batch[i]) != nullptr) {
+                    last_screen_update = i;
+                }
+            }
+            for (size_t action_index = 0; action_index < action_batch.size(); action_index++) {
+                Action &action = action_batch[action_index];
+                if ((std::get_if<ScreenUpdateAction>(&action) != nullptr) && (action_index != last_screen_update)) {
+                    continue; // stale screen update — a newer VI snapshot is in this batch
+                }
             // Determine the action type and act on it
             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
                 // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
@@ -372,6 +497,18 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
                 renderer_context->send_dl(&task_action->task);
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+                { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): per-task display-list processing cost on this thread.
+                    static const bool wcwDlog = getenv("WCW_PRESENT_LUM") != nullptr;
+                    if (wcwDlog) {
+                        static FILE *df = nullptr;
+                        if (df == nullptr) df = fopen("wcw_dl_log.csv", "w");
+                        if (df != nullptr) {
+                            double now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+                            fprintf(df, "%.1f,%.2f\n", now, std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count() / 1000.0);
+                            fflush(df);
+                        }
+                    }
+                }
 
                 dp_complete();
                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
@@ -380,6 +517,18 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 // printf("Renderer ProcessDList time: %d us\n", static_cast<u32>(std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count()));
             }
             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
+                { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): VI-enqueue -> gfx-thread processing latency.
+                    static const bool wcwUlog = getenv("WCW_PRESENT_LUM") != nullptr;
+                    if (wcwUlog) {
+                        static FILE *uf = nullptr;
+                        if (uf == nullptr) uf = fopen("wcw_supd_log.csv", "w");
+                        if (uf != nullptr) {
+                            double now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+                            fprintf(uf, "%.1f,%.1f\n", now, now - screen_update_action->wcw_enqueue_ms);
+                            fflush(uf);
+                        }
+                    }
+                }
                 events_context.vi.update_screen_regs = screen_update_action->regs;
                 renderer_context->update_screen();
                 display_refresh_rate = renderer_context->get_display_framerate();
@@ -395,6 +544,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
             else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
                 renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
             }
+            } // [wcw fix] end of drained-batch loop
         }
     }
 
@@ -456,6 +606,21 @@ void set_dummy_vi(bool odd) {
 
 extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
     std::lock_guard lock{ events_context.message_mutex };
+    // [wcw] DIAGNOSTIC: log swaps — if this never fires, VI scans out nothing (black screen)
+    // regardless of what the RDP rendered.
+    { static int n = 0; if (n++ < 30) fprintf(stderr, "[wcw][viswap#%d] fb=0x%08X\n", n, (unsigned)frameBufPtr); }
+    { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): timestamped swap log for present correlation.
+        static const bool wcwVlog = getenv("WCW_PRESENT_LUM") != nullptr;
+        if (wcwVlog) {
+            static FILE *vf = nullptr;
+            if (vf == nullptr) vf = fopen("wcw_swap_log.csv", "w");
+            if (vf != nullptr) {
+                double ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+                fprintf(vf, "%.1f,0x%X\n", ms, (unsigned)frameBufPtr);
+                fflush(vf);
+            }
+        }
+    }
     events_context.vi.get_next_state()->framebuffer = frameBufPtr;
 }
 

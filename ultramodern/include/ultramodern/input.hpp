@@ -57,6 +57,18 @@ namespace ultramodern {
         };
 
         void set_callbacks(const callbacks_t& callbacks);
+
+        // [wcw fix] Run the poll_input callback (latches host keyboard/controller state).
+        // Normally driven by osContStartReadData; games that bypass the osCont* API and talk
+        // raw SI/PIF (e.g. WCW's homegrown controller layer) never call that, so the raw-SI
+        // emulation must trigger the poll itself before sampling input.
+        void poll_input();
+
+        // [wcw fix] Run the set_rumble callback directly. Games that bypass the osCont*/osMotor*
+        // API and drive the Rumble Pak with raw joybus pak writes (address 0xC000 through the
+        // raw-SI/PIF path) never reach __osMotorAccess, so the PIF emulation (librecomp si.cpp)
+        // must forward motor commands itself.
+        void set_rumble(int controller_num, bool on);
     }
 }
 

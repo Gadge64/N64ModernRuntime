@@ -192,6 +192,14 @@ extern "C" int osSetTimer(RDRAM_ARG PTR(OSTimer) t_, OSTime countdown, OSTime in
     t->mq = mq;
     t->msg = msg;
 
+    // [wcw] identify who registers periodic timers (they keep firing into full queues post-freeze)
+    {
+        static int n = 0;
+        if (n++ < 30) fprintf(stderr, "[wcw][osSetTimer] t=0x%X countdown=%llu interval=%llu mq=0x%X msg=0x%X\n",
+            (unsigned)(uint32_t)t_, (unsigned long long)countdown, (unsigned long long)interval,
+            (unsigned)(uint32_t)mq, (unsigned)(uint32_t)msg);
+    }
+
     timer_context.action_queue.enqueue(AddTimerAction{ t_ });
 
     return 0;

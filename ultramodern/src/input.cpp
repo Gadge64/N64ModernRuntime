@@ -104,11 +104,25 @@ extern "C" s32 osContStartQuery(RDRAM_ARG PTR(OSMesgQueue) mq) {
     return 0;
 }
 
-extern "C" s32 osContStartReadData(RDRAM_ARG PTR(OSMesgQueue) mq) {
+// [wcw fix] Exposed so the raw-SI/PIF emulation (librecomp si.cpp) can latch host input;
+// games using raw SI never call osContStartReadData, which is normally the only poller.
+void ultramodern::input::poll_input() {
     if (input_callbacks.poll_input != nullptr) {
         input_callbacks.poll_input();
     }
     update_poll_time();
+}
+
+// [wcw fix] Exposed so the raw-SI/PIF emulation (librecomp si.cpp) can forward raw joybus
+// Rumble Pak motor commands (pak writes to 0xC000); games using raw SI never call osMotor*.
+void ultramodern::input::set_rumble(int controller_num, bool on) {
+    if (input_callbacks.set_rumble != nullptr) {
+        input_callbacks.set_rumble(controller_num, on);
+    }
+}
+
+extern "C" s32 osContStartReadData(RDRAM_ARG PTR(OSMesgQueue) mq) {
+    ultramodern::input::poll_input();
 
     ultramodern::send_si_message();
 

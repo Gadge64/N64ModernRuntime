@@ -8,6 +8,7 @@
 #include "librecomp/addresses.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/files.hpp"
+#include "librecomp/overlays.hpp"
 #include <ultramodern/ultra64.h>
 #include <ultramodern/ultramodern.hpp>
 
@@ -63,6 +64,18 @@ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
 
 void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
     // TODO use word copies when possible
+    // [wcw] DIAGNOSTIC: log every ROM read + flag out-of-range params.
+    {
+        static int n = 0;
+        size_t off = (size_t)physical_addr - (size_t)recomp::rom_base;
+        bool bad = (physical_addr < recomp::rom_base) || (off + num_bytes > rom.size());
+        if (n < 30 || bad) {
+            fprintf(stderr, "[wcw][rom_read#%d] rdram=%p dest=%p ram=0x%llX phys=0x%08X off=0x%zX nbytes=0x%zX rom.size=0x%zX rom_base=0x%X%s\n",
+                n, (void*)rdram, (void*)(rdram + (ram_address - 0xFFFFFFFF80000000ull)), (unsigned long long)ram_address, physical_addr, off, num_bytes, rom.size(), (unsigned)recomp::rom_base, bad ? "  <<< OUT OF RANGE" : "");
+        }
+        n++;
+        if (bad) { fprintf(stderr, "[wcw][rom_read] refusing out-of-range read\n"); fflush(stderr); return; }
+    }
 
     // TODO handle misaligned DMA
     assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");
@@ -195,6 +208,15 @@ void save_read(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t coun
     }
 }
 
+// [wcw] Host-pointer variant of save_read, for the raw-SI Controller Pak emulation in
+// si.cpp (which needs to copy into PIF RAM, not rdram).
+void save_read_ptr(void* out, uint32_t offset, uint32_t count) {
+    assert(offset + count <= save_context.save_buffer.size());
+
+    std::lock_guard lock { save_context.save_buffer_mutex };
+    memcpy(out, save_context.save_buffer.data() + offset, count);
+}
+
 void save_clear(uint32_t start, uint32_t size, char value) {
     assert(start + size < save_context.save_buffer.size());
 
@@ -266,6 +288,31 @@ void ultramodern::join_saving_thread() {
     }
 }
 
+// [wcw] WCW has two CPU overlays that both load to vram 0x80090000 (see disasm/README.md and
+// RecompiledFuncs/recomp_overlays.inl). The game DMAs the overlay code there and jumps to it;
+// we must register the overlay's recompiled functions with the runtime (load_overlays) so
+// get_function(0x80090000) resolves. Hook the cart-DMA path: when a transfer's destination is
+// the overlay base, map the matching overlay (unloading the previously-mapped one first).
+static void wcw_maybe_load_overlay(gpr rdram_address, uint32_t physical_addr) {
+    if ((uint32_t)rdram_address != 0x80090000) {
+        return;
+    }
+    static const struct { uint32_t rom; uint32_t size; } ovls[] = {
+        { 0x00A21750, 0x00033BC0 }, // overlay A
+        { 0x00A69570, 0x00055F70 }, // overlay B
+    };
+    uint32_t rom_off = physical_addr - (uint32_t)recomp::rom_base;
+    for (const auto& o : ovls) {
+        if (rom_off == o.rom) {
+            fprintf(stderr, "[wcw][ovl] map overlay rom=0x%06X -> 0x80090000 size=0x%X\n", o.rom, o.size);
+            unload_overlays(0x80090000, 0x00056000); // cover the largest overlay
+            load_overlays(o.rom, 0x80090000, o.size);
+            return;
+        }
+    }
+    fprintf(stderr, "[wcw][ovl] DMA to 0x80090000 from unrecognized rom 0x%X\n", rom_off);
+}
+
 void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
     // TODO asynchronous transfer
     // TODO implement unaligned DMA correctly
@@ -273,6 +320,7 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
         if (physical_addr >= recomp::rom_base) {
             // read cart rom
             recomp::do_rom_read(rdram, rdram_address, physical_addr, size);
+            wcw_maybe_load_overlay(rdram_address, physical_addr);
 
             // Send a message to the mq to indicate that the transfer completed
             ultramodern::enqueue_external_message(mq, 0, false, true);

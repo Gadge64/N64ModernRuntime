@@ -38,7 +38,14 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
 // For SDL2
 //uint32_t buffer_offset_frames = 1;
 // For Godot
-float buffer_offset_frames = 0.5f;
+//float buffer_offset_frames = 0.5f;
+// [wcw fix] WCW registers no AI event (verified: osSetEventMesg(OS_EVENT_AI) never called);
+// its audio thread generates a burst once per ~33ms game frame, sized by osAiGetLength.
+// On hardware osAiGetLength reports only the current DMA buffer, so the game stays buffers
+// ahead; here it sees the whole host queue and keeps ~0 headroom → constant underruns
+// (~22/s measured) against SDL's chunked consumption. Under-report by ~6 VIs worth
+// (~50ms @ 22050 Hz) so the game builds real queue depth. Costs ~50ms audio latency.
+float buffer_offset_frames = 6.0f;
 
 // If there's ever any audio popping, check here first. Some games are very sensitive to
 // the remaining sample count and reporting a number that's too high here can lead to issues.
