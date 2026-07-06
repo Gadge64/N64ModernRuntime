@@ -262,9 +262,10 @@ void vi_thread_func() {
         // Update VI registers and swap VI modes.
         events_context.vi.update_vi();
 
-        { // [wcw] DIAGNOSTIC: scanout health — log origin changes (framebuffer cycling
-          // pattern) and black scanouts (hStart==0 = VI_STATE_BLACK), to characterize
-          // visual flicker. First ~200 origin changes logged individually + 1/s summary.
+        { // [wcw] DIAGNOSTIC (env WCW_VI_LOG=1): scanout health — log origin changes
+          // (framebuffer cycling pattern) and black scanouts (hStart==0 = VI_STATE_BLACK),
+          // to characterize visual flicker. First ~200 origin changes individually + 1/s summary.
+            static const bool wcw_vi_log = getenv("WCW_VI_LOG") != nullptr;
             static uint32_t last_origin = 0xFFFFFFFF; static int vis = 0, changes = 0, blacks = 0, logged = 0;
             uint32_t org = events_context.vi.regs.VI_ORIGIN_REG;
             uint32_t hs = events_context.vi.regs.VI_H_START_REG;
@@ -272,16 +273,19 @@ void vi_thread_func() {
             if (hs == 0) blacks++;
             if (org != last_origin) {
                 changes++;
-                if (logged < 200) { fprintf(stderr, "[wcw][scan] vi=%llu origin 0x%08X -> 0x%08X hstart=0x%X\n", (unsigned long long)total_vis, last_origin, org, hs); logged++; }
+                if (logged < 200 && wcw_vi_log) { fprintf(stderr, "[wcw][scan] vi=%llu origin 0x%08X -> 0x%08X hstart=0x%X\n", (unsigned long long)total_vis, last_origin, org, hs); logged++; }
                 last_origin = org;
             }
             if (vis >= 60) {
                 extern std::atomic_int wcw_ai_del, wcw_ai_drop, wcw_vi_del, wcw_vi_drop;
                 extern std::atomic<int64_t> wcw_ai_maxlat, wcw_vi_maxlat;
-                fprintf(stderr, "[wcw][scan] 60 VIs: origin-changes=%d blacks=%d | ai del=%d drop=%d maxlat=%lldms | vi del=%d drop=%d maxlat=%lldms\n",
-                    changes, blacks,
-                    wcw_ai_del.exchange(0), wcw_ai_drop.exchange(0), (long long)wcw_ai_maxlat.exchange(0),
-                    wcw_vi_del.exchange(0), wcw_vi_drop.exchange(0), (long long)wcw_vi_maxlat.exchange(0));
+                int ai_del = wcw_ai_del.exchange(0), ai_drop = wcw_ai_drop.exchange(0);
+                int vi_del = wcw_vi_del.exchange(0), vi_drop = wcw_vi_drop.exchange(0);
+                long long ai_maxlat = wcw_ai_maxlat.exchange(0), vi_maxlat = wcw_vi_maxlat.exchange(0);
+                if (wcw_vi_log) {
+                    fprintf(stderr, "[wcw][scan] 60 VIs: origin-changes=%d blacks=%d | ai del=%d drop=%d maxlat=%lldms | vi del=%d drop=%d maxlat=%lldms\n",
+                        changes, blacks, ai_del, ai_drop, ai_maxlat, vi_del, vi_drop, vi_maxlat);
+                }
                 vis = 0; changes = 0; blacks = 0;
             }
         }
@@ -292,12 +296,13 @@ void vi_thread_func() {
             
             std::lock_guard lock{ events_context.message_mutex };
             ViState* cur_state = events_context.vi.get_cur_state();
-            { // [wcw] DIAGNOSTIC: report VI/AI retrace-queue registration once a second, plus the
-              // fixed-segment game-mode state var @ 0x80034834 (0=overlay A, 1=overlay B — it
-              // advances 0->1 when B loads then sticks, i.e. the overlay-B internal state is the
-              // stall). Read from rdram with the recomp byte-swap (byte at game offset X = rdram[X^3]).
+            { // [wcw] DIAGNOSTIC (env WCW_VI_LOG=1): report VI/AI retrace-queue registration once a
+              // second, plus the fixed-segment game-mode state var @ 0x80034834 (0=overlay A,
+              // 1=overlay B — it advances 0->1 when B loads then sticks, i.e. the overlay-B internal
+              // state is the stall). Read from rdram with the recomp byte-swap (byte at offset X = rdram[X^3]).
+                static const bool wcw_vi_log = getenv("WCW_VI_LOG") != nullptr;
                 static int tick = 0;
-                if ((tick++ % 60) == 0) {
+                if (((tick++ % 60) == 0) && wcw_vi_log) {
                     uint8_t* rd = events_context.rdram;
                     auto rd32 = [rd](uint32_t off) -> uint32_t {
                         return ((uint32_t)rd[(off+0)^3] << 24) | ((uint32_t)rd[(off+1)^3] << 16)
