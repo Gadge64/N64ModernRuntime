@@ -262,6 +262,11 @@ void vi_thread_func() {
         // Update VI registers and swap VI modes.
         events_context.vi.update_vi();
 
+        { // [wcw] DIAGNOSTIC: 1/s health line (game frame rate + external-message backlog).
+            extern void wcw_health_tick();
+            wcw_health_tick();
+        }
+
         { // [wcw] DIAGNOSTIC (env WCW_VI_LOG=1): scanout health — log origin changes
           // (framebuffer cycling pattern) and black scanouts (hStart==0 = VI_STATE_BLACK),
           // to characterize visual flicker. First ~200 origin changes individually + 1/s summary.
@@ -609,8 +614,14 @@ void set_dummy_vi(bool odd) {
     }
 }
 
+// [wcw] DIAGNOSTIC: per-second game-frame counter, reported in the [wcw][health] line
+// (mesgqueue.cpp). osViSwapBuffer fires once per rendered game frame, so a drop in this
+// rate is a direct measure of "the game slowed down" regardless of host present rate.
+std::atomic_int wcw_viswaps{0};
+
 extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
     std::lock_guard lock{ events_context.message_mutex };
+    wcw_viswaps.fetch_add(1);
     // [wcw] DIAGNOSTIC: log swaps — if this never fires, VI scans out nothing (black screen)
     // regardless of what the RDP rendered.
     { static int n = 0; if (n++ < 30) fprintf(stderr, "[wcw][viswap#%d] fb=0x%08X\n", n, (unsigned)frameBufPtr); }
