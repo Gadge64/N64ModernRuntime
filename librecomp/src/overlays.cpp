@@ -200,7 +200,19 @@ extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size) {
     );
     // Load the overlays that were found
     for (auto it = lower; it != upper; ++it) {
-        load_overlay(std::distance(&sections_info.code_sections[0], it), it->rom_addr - rom + ram_addr);
+        int32_t load_addr = it->rom_addr - rom + ram_addr;
+        // [wcw fix] Only map sections landing at their registered ram address. Revenge stores
+        // its two swap-overlays right after the fixed image (rom 0x3C770/0x834A0), INSIDE the
+        // boot DMA's 1MB window — the boot-time load_overlays(0x1000, entrypoint, 1MB) call in
+        // recomp.cpp would otherwise register them at bogus contiguous addresses (e.g. ovl_b at
+        // 0x800828A0), which later collides with the real swap-in at 0x80090000 ("Cannot
+        // partially unload section"). Every legitimate caller in this stack (boot fixed-segment
+        // map, the pi.cpp overlay-swap hook, WT's layout) loads sections at their registered
+        // address, so this filter is a no-op for them.
+        if (load_addr != it->ram_addr) {
+            continue;
+        }
+        load_overlay(std::distance(&sections_info.code_sections[0], it), load_addr);
     }
 }
 

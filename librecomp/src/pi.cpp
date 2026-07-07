@@ -288,27 +288,27 @@ void ultramodern::join_saving_thread() {
     }
 }
 
-// [wcw] WCW has two CPU overlays that both load to vram 0x80090000 (see disasm/README.md and
+// [wcw] The AKI games (WCW World Tour rom 0xA21750/0xA69570, Revenge rom 0x3C770/0x834A0) have
+// two CPU overlays that BOTH load to vram 0x80090000 (see each port's disasm docs and
 // RecompiledFuncs/recomp_overlays.inl). The game DMAs the overlay code there and jumps to it;
 // we must register the overlay's recompiled functions with the runtime (load_overlays) so
 // get_function(0x80090000) resolves. Hook the cart-DMA path: when a transfer's destination is
-// the overlay base, map the matching overlay (unloading the previously-mapped one first).
+// the overlay base and the source rom offset is a registered overlay section — looked up in the
+// game's own registered section table instead of a per-game hardcoded list — map that overlay,
+// unloading the previously-mapped one first. The 0x60000 window bounds section selection
+// (load_overlays only loads sections fully inside it, and load_overlay uses the section's own
+// size); it covers either game's largest overlay without reaching the next section.
 static void wcw_maybe_load_overlay(gpr rdram_address, uint32_t physical_addr) {
     if ((uint32_t)rdram_address != 0x80090000) {
         return;
     }
-    static const struct { uint32_t rom; uint32_t size; } ovls[] = {
-        { 0x00A21750, 0x00033BC0 }, // overlay A
-        { 0x00A69570, 0x00055F70 }, // overlay B
-    };
     uint32_t rom_off = physical_addr - (uint32_t)recomp::rom_base;
-    for (const auto& o : ovls) {
-        if (rom_off == o.rom) {
-            fprintf(stderr, "[wcw][ovl] map overlay rom=0x%06X -> 0x80090000 size=0x%X\n", o.rom, o.size);
-            unload_overlays(0x80090000, 0x00056000); // cover the largest overlay
-            load_overlays(o.rom, 0x80090000, o.size);
-            return;
-        }
+    const auto& vrom_map = recomp::overlays::get_vrom_to_section_map();
+    if (vrom_map.find(rom_off) != vrom_map.end()) {
+        fprintf(stderr, "[wcw][ovl] map overlay rom=0x%06X -> 0x80090000\n", rom_off);
+        unload_overlays(0x80090000, 0x00060000); // cover the largest overlay of either game
+        load_overlays(rom_off, 0x80090000, 0x00060000);
+        return;
     }
     fprintf(stderr, "[wcw][ovl] DMA to 0x80090000 from unrecognized rom 0x%X\n", rom_off);
 }
