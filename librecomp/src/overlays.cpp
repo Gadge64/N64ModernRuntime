@@ -318,6 +318,40 @@ extern "C" bool wcw_try_swap_overlay(uint32_t rom_off, int32_t ram_addr) {
         }
     }
     load_overlay(idx, ram_addr);
+    // [wcw2k] Child sections living INSIDE a parent overlay's rom image (hidden code
+    // pockets/islands mapped as separate sections) are registered once at boot by
+    // load_boot_resident_overlays, but a swap unloads them with the parent (overlap
+    // sweep above) and reloading only the parent left them unregistered: boot91 died
+    // with "Failed to find function at 0x80106928" (ovl_a's pocket) in the menus after
+    // the first match, because the post-match ovl_a reload never re-registered it.
+    // Re-register every child of the incoming overlay (skip if still loaded).
+    static const struct { uint32_t parent_rom; uint32_t child_rom; } wcw2k_children[] = {
+        { 0x4C160, 0x70EF8 },   // WM2000 ovl_a hidden code pocket (vram 0x80106928)
+        { 0x809D0, 0xD0C2C },   // WM2000 ovl_c cold-path island  (vram 0x8016CB5C)
+    };
+    for (const auto& ch : wcw2k_children) {
+        if (ch.parent_rom != rom_off) {
+            continue;
+        }
+        auto child_it = code_sections_by_rom.find(ch.child_rom);
+        if (child_it == code_sections_by_rom.end()) {
+            continue;
+        }
+        size_t child_idx = child_it->second;
+        bool already = false;
+        for (const auto& ls : loaded_sections) {
+            if (ls.section_table_index == child_idx) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) {
+            const SectionTableEntry& cs = sections_info.code_sections[child_idx];
+            fprintf(stderr, "[wcw2k][ovl] re-registering child section rom=0x%06X at 0x%08X\n",
+                cs.rom_addr, (uint32_t)cs.ram_addr);
+            load_overlay(child_idx, cs.ram_addr);
+        }
+    }
     return true;
 }
 
