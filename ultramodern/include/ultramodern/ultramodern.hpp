@@ -57,6 +57,15 @@ void wait_for_external_message(RDRAM_ARG1);
 void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
 
 // Thread scheduling.
+// [wcw2k] repair a game-wiped TCB (context/pri/id) from the authoritative host-side
+// record before any raw rdram read of its fields; see threads.cpp.
+UltraThreadContext* wcw2k_repair_thread(RDRAM_ARG PTR(OSThread) t);
+// [wcw2k] running-queue entry timestamp for the anti-starvation valve (threads.cpp);
+// called by thread_queue_insert on running-queue inserts.
+void wcw2k_note_thread_queued(PTR(OSThread) t);
+// [wcw2k] true while t is inside its post-valve boost window (check_running_queue
+// skips priority preemption for it); see threads.cpp.
+bool wcw2k_thread_boosted(PTR(OSThread) t);
 void check_running_queue(RDRAM_ARG1);
 void run_next_thread_and_wait(RDRAM_ARG1);
 void resume_thread_and_wait(RDRAM_ARG OSThread* t);
@@ -99,6 +108,12 @@ void init_audio();
 void set_audio_frequency(uint32_t freq);
 void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
 uint32_t get_remaining_audio_bytes();
+// [wcw2k] True when the host audio queue holds more than ~8 VIs of samples. Used by
+// osAiGetStatus to model the AI FIFO-full backpressure that paces AKI audio drivers
+// (WM2000's audio manager loops on `osAiGetStatus() & AI_STATUS_FULL` before generating;
+// without this it over-produces one fixed burst per frame message — unbounded queue
+// growth in healthy runs, 500 tasks/s free-run in message-clumped unattended sessions).
+bool is_audio_backlogged();
 
 struct audio_callbacks_t {
     using queue_samples_t = void(int16_t*, size_t);

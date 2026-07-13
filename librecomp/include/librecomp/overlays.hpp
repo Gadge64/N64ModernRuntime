@@ -63,5 +63,9 @@ namespace recomp {
 
 extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size);
 extern "C" void unload_overlays(int32_t ram_addr, uint32_t size);
+// [wcw2k] see overlays.cpp — boot-image-resident overlay registration + generalized
+// multi-slot overlay swap (WM2000).
+extern "C" void load_boot_resident_overlays(uint32_t boot_rom, int32_t boot_ram, uint32_t boot_size);
+extern "C" bool wcw_try_swap_overlay(uint32_t rom_off, int32_t ram_addr);
 
 #endif

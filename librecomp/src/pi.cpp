@@ -75,6 +75,15 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
         }
         n++;
         if (bad) { fprintf(stderr, "[wcw][rom_read] refusing out-of-range read\n"); fflush(stderr); return; }
+        // [wcw2k] DIAGNOSTIC: catch ovl_d loads regardless of DMA path (raw PI transfers
+        // bypass do_dma and thus the overlay swap hook + its logging).
+        // Range covers ovl_d text AND data (rom 0xD2720..0x144AA0): boot88's in-match rope
+        // corruption made the data-section stream (tables at vram 0x8014C640+) a suspect,
+        // and the old 0x13D1D0 (text-end) cutoff made those chunks invisible in the log.
+        if ((off >= 0xD2720 && off < 0x144AA0) || (uint32_t)ram_address == 0xFFFFFFFF800E1B90ull || (uint32_t)ram_address == 0x800E1B90u) {
+            fprintf(stderr, "[wcw2k][ovl?] rom_read rom=0x%zX -> ram=0x%08X len=0x%zX\n",
+                off, (uint32_t)ram_address, num_bytes);
+        }
     }
 
     // TODO handle misaligned DMA
@@ -298,19 +307,27 @@ void ultramodern::join_saving_thread() {
 // unloading the previously-mapped one first. The 0x60000 window bounds section selection
 // (load_overlays only loads sections fully inside it, and load_overlay uses the section's own
 // size); it covers either game's largest overlay without reaching the next section.
+// [wcw2k] Generalized: instead of hardcoding the 0x80090000 slot, any DMA whose source rom
+// offset names a registered code section AND whose destination equals that section's link
+// address is treated as an overlay swap (wcw_try_swap_overlay in overlays.cpp fully unloads
+// whatever the incoming section clobbers, then loads it). Handles WM2000's two swap slots
+// (0x800E1B90 / 0x8011C900, four overlays, one spanning both) with identical behavior for
+// WT/Revenge (their swap sections' ram_addr IS 0x80090000).
 static void wcw_maybe_load_overlay(gpr rdram_address, uint32_t physical_addr) {
-    if ((uint32_t)rdram_address != 0x80090000) {
-        return;
-    }
     uint32_t rom_off = physical_addr - (uint32_t)recomp::rom_base;
-    const auto& vrom_map = recomp::overlays::get_vrom_to_section_map();
-    if (vrom_map.find(rom_off) != vrom_map.end()) {
-        fprintf(stderr, "[wcw][ovl] map overlay rom=0x%06X -> 0x80090000\n", rom_off);
-        unload_overlays(0x80090000, 0x00060000); // cover the largest overlay of either game
-        load_overlays(rom_off, 0x80090000, 0x00060000);
-        return;
+    if (wcw_try_swap_overlay(rom_off, (int32_t)(uint32_t)rdram_address)) {
+        fprintf(stderr, "[wcw][ovl] map overlay rom=0x%06X -> 0x%08X\n", rom_off, (uint32_t)rdram_address);
     }
-    fprintf(stderr, "[wcw][ovl] DMA to 0x80090000 from unrecognized rom 0x%X\n", rom_off);
+    // [wcw2k] DIAGNOSTIC: WM2000 boot77 crashed executing ovl_d-only code with ovl_d never
+    // mapped — either its load uses a rom offset/destination the swap hook doesn't match, or
+    // the load never happens. Log every DMA that touches the swap slots or the ovl_d image.
+    else {
+        uint32_t dst = (uint32_t)rdram_address;
+        if (dst == 0x800E1B90u || dst == 0x8011C900u ||
+            (rom_off >= 0xD2720u && rom_off < 0x13D1D0u)) {
+            fprintf(stderr, "[wcw2k][ovl?] unmatched DMA rom=0x%06X -> 0x%08X\n", rom_off, dst);
+        }
+    }
 }
 
 void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {

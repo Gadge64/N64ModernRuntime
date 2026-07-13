@@ -22,6 +22,12 @@ void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(O
     toadd->queue = queue_;
     *cur = toadd_;
 
+    // [wcw2k] stamp running-queue entry time for the anti-starvation valve
+    // (see wcw2k_pop_starved in threads.cpp).
+    if (queue_ == ultramodern::running_queue) {
+        ultramodern::wcw2k_note_thread_queued(toadd_);
+    }
+
     debug_printf("  Contains:");
     cur = queue_to_ptr(PASS_RDRAM queue_);
     while (*cur) {

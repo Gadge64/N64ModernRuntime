@@ -66,6 +66,19 @@ static void wcw_note_requeue(PTR(OSMesgQueue) mq, OSMesg msg) {
     }
 }
 
+// [wcw2k] DIAGNOSTIC: per-(mq,msg) histogram of successful EXTERNAL deliveries, printed on the
+// 1/s health line. Attributes an elevated del/s (e.g. WM2000's ~700/s vs ~190/s healthy — the
+// high-priority audio-chain saturation that starves the pri-8 game loop) to its source queue.
+static WcwRequeueSlot wcw2k_deliver_hist[8];
+static void wcw2k_note_delivery(PTR(OSMesgQueue) mq, OSMesg msg) {
+    uint64_t key = ((uint64_t)(uint32_t)mq << 32) | (uint32_t)msg;
+    for (auto& slot : wcw2k_deliver_hist) {
+        uint64_t cur = slot.key.load(std::memory_order_relaxed);
+        if (cur == key) { slot.count.fetch_add(1, std::memory_order_relaxed); return; }
+        if (cur == 0) { slot.key.store(key, std::memory_order_relaxed); slot.count.fetch_add(1, std::memory_order_relaxed); return; }
+    }
+}
+
 void dequeue_external_messages(RDRAM_ARG1) {
     QueuedMessage to_send;
     std::vector<QueuedMessage> requeued_messages{};
@@ -84,6 +97,7 @@ void dequeue_external_messages(RDRAM_ARG1) {
         }
         else {
             wcw_extmsg_delivered.fetch_add(1);
+            wcw2k_note_delivery(to_send.mq, to_send.mesg);
         }
     }
     wcw_requeues.fetch_add((int)requeued_messages.size());
@@ -110,13 +124,23 @@ void wcw_health_tick() {
     if (last_ms == 0) { last_ms = now; return; }
     if (now - last_ms < 1000) { return; }
     last_ms = now;
-    char hist[128] = "";
+    char hist[256] = "";
     for (auto& slot : wcw_requeue_hist) {
         uint64_t key = slot.key.load(std::memory_order_relaxed);
         uint32_t cnt = slot.count.exchange(0, std::memory_order_relaxed);
         if (key != 0 && cnt != 0) {
             size_t len = strlen(hist);
             snprintf(hist + len, sizeof(hist) - len, " mq=0x%X/msg=0x%X:%u",
+                (uint32_t)(key >> 32), (uint32_t)key, cnt);
+        }
+    }
+    // [wcw2k] per-mq delivery attribution (see wcw2k_deliver_hist above).
+    for (auto& slot : wcw2k_deliver_hist) {
+        uint64_t key = slot.key.load(std::memory_order_relaxed);
+        uint32_t cnt = slot.count.exchange(0, std::memory_order_relaxed);
+        if (key != 0 && cnt != 0) {
+            size_t len = strlen(hist);
+            snprintf(hist + len, sizeof(hist) - len, " del[0x%X/0x%X]:%u",
                 (uint32_t)(key >> 32), (uint32_t)key, cnt);
         }
     }
@@ -141,6 +165,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
     do {
         if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
             delivered_any = true;
+            wcw2k_note_delivery(to_send.mq, to_send.mesg);
         }
         else if (to_send.requeue_if_blocked) {
             // [wcw fix] Same grace-window drop as dequeue_external_messages above.
@@ -180,6 +205,14 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
 
 extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
     OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
+    // [wcw2k] DIAGNOSTIC: WM2000's post-attract crash traced to message values landing
+    // in thread 6's stack (func_800E2704's saved-s0 slot 0x80083900 receives retrace/
+    // task-done message values). Log any queue whose ring buffer lands in that region
+    // to identify the creator.
+    if ((uint32_t)msg >= 0x80080000u && (uint32_t)msg < 0x80084000u) {
+        fprintf(stderr, "[wcw2k][mq] osCreateMesgQueue mq=0x%08X BUFFER=0x%08X count=%d (in thread-6 TCB/stack region!)\n",
+            (uint32_t)mq_, (uint32_t)msg, count);
+    }
     mq->blocked_on_recv = NULLPTR;
     mq->blocked_on_send = NULLPTR;
     mq->msgCount = count;
@@ -232,6 +265,10 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
         // msg==0x29C check, letting blocking 0x29C sends post into a full queue. Restored.)
         while (MQ_IS_FULL(mq)) {
             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+            // [wcw2k] WCW_BLOCK_LOG=1: trace where threads park (wedge diagnosis)
+            static const bool wcw_block_log = getenv("WCW_BLOCK_LOG") != nullptr;
+            if (wcw_block_log) fprintf(stderr, "[wcw2k][block] id=%d self=0x%08X SEND mq=0x%08X\n",
+                TO_PTR(OSThread, ultramodern::this_thread())->id, (uint32_t)ultramodern::this_thread(), (uint32_t)mq_);
             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
         }
@@ -282,6 +319,10 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
         // Otherwise, yield this thread in a loop until the queue is no longer full
         while (MQ_IS_EMPTY(mq)) {
             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+            // [wcw2k] WCW_BLOCK_LOG=1: trace where threads park (wedge diagnosis)
+            static const bool wcw_block_log = getenv("WCW_BLOCK_LOG") != nullptr;
+            if (wcw_block_log) fprintf(stderr, "[wcw2k][block] id=%d self=0x%08X RECV mq=0x%08X\n",
+                TO_PTR(OSThread, ultramodern::this_thread())->id, (uint32_t)ultramodern::this_thread(), (uint32_t)mq_);
             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
         }
@@ -306,7 +347,18 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
 extern "C" s32 osSendMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, s32 flags) {
     OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
     bool jam = false;
-    
+
+    // [wcw2k] DIAGNOSTIC: sends into thread 6's upper stack frames (the func_800E2704
+    // saved-s0 slot 0x80083900 corruption — bringup session 5 part 5). Log the target
+    // mq, its ring buffer, and the sender.
+    if (((uint32_t)mq_ >= 0x80083800u && (uint32_t)mq_ < 0x80083A00u) ||
+        ((uint32_t)mq->msg >= 0x80083800u && (uint32_t)mq->msg < 0x80083A00u)) {
+        fprintf(stderr, "[wcw2k][send] mq=0x%08X buf=0x%08X valid=%d msg=0x%08X sender=0x%08X game=%d\n",
+            (uint32_t)mq_, (uint32_t)mq->msg, mq->validCount, (uint32_t)msg,
+            ultramodern::is_game_thread() ? (uint32_t)ultramodern::this_thread() : 0,
+            (int)ultramodern::is_game_thread());
+    }
+
     // Don't directly send to the message queue if this isn't a game thread to avoid contention.
     if (!ultramodern::is_game_thread()) {
         ultramodern::enqueue_external_message(mq_, msg, jam, false);

@@ -250,6 +250,77 @@ extern "C" void load_overlay_by_id(uint32_t id, uint32_t ram_addr) {
     }
 }
 
+// [wcw2k] WM2000 support (see Wm2kRecomp CLAUDE.md; upstream to the jessetbh fork's wcw
+// branch alongside the [wcw fix] set).
+//
+// Boot-resident overlays: WM2000 stores its first two swap-overlays (rom 0x4C160/0x73390)
+// INSIDE the IPL3 1MB boot image and block-copies them to their link addresses with the
+// CPU instead of PI DMA, so the pi.cpp swap hook never sees a load. After the boot-window
+// load, register every section that (a) lies fully inside the boot window, (b) does NOT
+// land at its own address contiguously (those are fixed-segment splits the normal
+// load_overlays call already handled), and (c) doesn't overlap another such candidate
+// (Revenge's two overlays both live in-window at the SAME address — that game DMA-swaps
+// them properly, so they must stay unregistered until the swap hook fires; this filter
+// keeps WT/Revenge behavior byte-identical).
+extern "C" void load_boot_resident_overlays(uint32_t boot_rom, int32_t boot_ram, uint32_t boot_size) {
+    std::vector<size_t> cands;
+    for (size_t i = 0; i < sections_info.num_code_sections; i++) {
+        const SectionTableEntry& s = sections_info.code_sections[i];
+        if (s.rom_addr < boot_rom || s.rom_addr + s.size > boot_rom + boot_size) continue;
+        if ((int32_t)(s.rom_addr - boot_rom) + boot_ram == s.ram_addr) continue;
+        cands.push_back(i);
+    }
+    for (size_t i : cands) {
+        const SectionTableEntry& s = sections_info.code_sections[i];
+        bool conflict = false;
+        for (size_t j : cands) {
+            if (j == i) continue;
+            const SectionTableEntry& o = sections_info.code_sections[j];
+            if (s.ram_addr < o.ram_addr + (int32_t)o.size && o.ram_addr < s.ram_addr + (int32_t)s.size) {
+                conflict = true; break;
+            }
+        }
+        if (conflict) continue;
+        fprintf(stderr, "[wcw][ovl] boot-resident overlay rom=0x%06X registered at 0x%08X\n",
+            s.rom_addr, (uint32_t)s.ram_addr);
+        load_overlay(i, s.ram_addr);
+    }
+}
+
+// [wcw2k] Generalized overlay swap for multi-slot AKI games (WM2000: slots 0x800E1B90 and
+// 0x8011C900, four overlays, one of which spans both slots). If rom_off names a registered
+// code section whose link address equals the DMA destination, swap it in: fully unload
+// every loaded section overlapping the incoming range (unload_overlays' partial-overlap
+// guard is correct for its other callers, but a swap legitimately clobbers a larger
+// resident section), then load. Replaces pi.cpp's hardcoded dest==0x80090000 check;
+// WT/Revenge behavior is unchanged (their swap sections' ram_addr IS 0x80090000).
+extern "C" bool wcw_try_swap_overlay(uint32_t rom_off, int32_t ram_addr) {
+    auto find_it = code_sections_by_rom.find(rom_off);
+    if (find_it == code_sections_by_rom.end()) {
+        return false;
+    }
+    size_t idx = find_it->second;
+    const SectionTableEntry& s = sections_info.code_sections[idx];
+    if (s.ram_addr != ram_addr) {
+        return false;
+    }
+    for (auto it = loaded_sections.begin(); it != loaded_sections.end();) {
+        const SectionTableEntry& ls = sections_info.code_sections[it->section_table_index];
+        if (ram_addr < it->loaded_ram_addr + (int32_t)ls.size && it->loaded_ram_addr < ram_addr + (int32_t)s.size) {
+            for (size_t fi = 0; fi < ls.num_funcs; fi++) {
+                func_map.erase(it->loaded_ram_addr + ls.funcs[fi].offset);
+            }
+            section_addresses[ls.index] = ls.ram_addr;
+            it = loaded_sections.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+    load_overlay(idx, ram_addr);
+    return true;
+}
+
 extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
     for (auto it = loaded_sections.begin(); it != loaded_sections.end();) {
         const auto& section = sections_info.code_sections[it->section_table_index];

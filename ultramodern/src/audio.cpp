@@ -47,6 +47,20 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
 // (~50ms @ 22050 Hz) so the game builds real queue depth. Costs ~50ms audio latency.
 float buffer_offset_frames = 6.0f;
 
+// [wcw2k] AI backpressure model (see ultramodern.hpp). Threshold must sit ABOVE the
+// buffer_offset_frames under-report below (6 VIs), so drivers that pace themselves by
+// osAiGetLength (WCW/Revenge) still build their ~6-VI depth before FULL ever asserts —
+// their behavior is unchanged. Drivers that pace by AI_STATUS_FULL (WM2000) bound the
+// host queue at ~8 VIs (~130ms) instead of growing it forever.
+bool ultramodern::is_audio_backlogged() {
+    if (audio_callbacks.get_frames_remaining == nullptr) {
+        return false;
+    }
+    uint32_t buffered_frames = (uint32_t)audio_callbacks.get_frames_remaining();
+    uint32_t frames_per_vi = sample_rate / 60;
+    return buffered_frames > 8 * frames_per_vi;
+}
+
 // If there's ever any audio popping, check here first. Some games are very sensitive to
 // the remaining sample count and reporting a number that's too high here can lead to issues.
 // Reporting a number that's too low can lead to audio lag in some games.

@@ -391,9 +391,40 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
             return;
         }
 
+        // [wcw2k] DIAGNOSTIC (WCW2K_TASKWATCH=1): WM2000's corruption family (TCB wipes,
+        // music-slot garbage, thread-6 stack slots — float debris) lives in the audio
+        // heap around 0x80080000-0x80084000. The RSP task thread runs CONCURRENTLY with
+        // the cooperative game threads, so scheduler-touch watchers mis-attribute its
+        // writes. Snapshot the hot windows around each task run to convict or acquit
+        // the recompiled audio ucode directly.
+        static const bool taskwatch = getenv("WCW2K_TASKWATCH") != nullptr;
+        static uint32_t snap[0x60 / 4];
+        static uint32_t tasknum = 0;
+        constexpr uint32_t tcb_off = 0x807C0, frame_off = 0x83900;
+        if (taskwatch) {
+            memcpy(snap, rdram + tcb_off, 0x30);
+            memcpy(snap + 0x30 / 4, rdram + frame_off, 0x30);
+        }
+        tasknum++;
+
         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
             fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);
             ULTRAMODERN_QUICK_EXIT();
+        }
+
+        if (taskwatch) {
+            const uint32_t* now_tcb = (const uint32_t*)(rdram + tcb_off);
+            const uint32_t* now_frm = (const uint32_t*)(rdram + frame_off);
+            for (uint32_t i = 0; i < 0x30 / 4; i++) {
+                if (now_tcb[i] != snap[i]) {
+                    fprintf(stderr, "[wcw2k][taskwatch] task#%u type=%u CHANGED 0x%08X: %08X -> %08X\n",
+                        tasknum, (unsigned)task->t.type, 0x80000000u + tcb_off + i * 4, snap[i], now_tcb[i]);
+                }
+                if (now_frm[i] != snap[0x30 / 4 + i]) {
+                    fprintf(stderr, "[wcw2k][taskwatch] task#%u type=%u CHANGED 0x%08X: %08X -> %08X\n",
+                        tasknum, (unsigned)task->t.type, 0x80000000u + frame_off + i * 4, snap[0x30 / 4 + i], now_frm[i]);
+                }
+            }
         }
 
         // Tell the game that the RSP has completed

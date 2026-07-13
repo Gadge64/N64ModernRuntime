@@ -498,6 +498,11 @@ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
     // Load overlays in the first 1MB
     load_overlays(0x1000, (int32_t)entrypoint, 1024 * 1024);
 
+    // [wcw2k] Register boot-resident swap overlays at their own link addresses (WM2000
+    // block-copies them out of the boot image with the CPU — no DMA to hook). No-op for
+    // WT/Revenge; see overlays.cpp.
+    load_boot_resident_overlays(0x1000, (int32_t)entrypoint, 1024 * 1024);
+
     // Initial 1MB DMA (rom address 0x1000 = physical address 0x10001000)
     recomp::do_rom_read(rdram, entrypoint, 0x10001000, 0x100000);
 
