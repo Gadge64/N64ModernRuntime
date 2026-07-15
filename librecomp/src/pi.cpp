@@ -80,7 +80,8 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
         // Range covers ovl_d text AND data (rom 0xD2720..0x144AA0): boot88's in-match rope
         // corruption made the data-section stream (tables at vram 0x8014C640+) a suspect,
         // and the old 0x13D1D0 (text-end) cutoff made those chunks invisible in the log.
-        if ((off >= 0xD2720 && off < 0x144AA0) || (uint32_t)ram_address == 0xFFFFFFFF800E1B90ull || (uint32_t)ram_address == 0x800E1B90u) {
+        static const bool wcwTrace = getenv("WCW_TRACE") != nullptr;
+        if (wcwTrace && ((off >= 0xD2720 && off < 0x144AA0) || (uint32_t)ram_address == 0xFFFFFFFF800E1B90ull || (uint32_t)ram_address == 0x800E1B90u)) {
             fprintf(stderr, "[wcw2k][ovl?] rom_read rom=0x%zX -> ram=0x%08X len=0x%zX\n",
                 off, (uint32_t)ram_address, num_bytes);
         }
@@ -323,8 +324,9 @@ static void wcw_maybe_load_overlay(gpr rdram_address, uint32_t physical_addr) {
     // the load never happens. Log every DMA that touches the swap slots or the ovl_d image.
     else {
         uint32_t dst = (uint32_t)rdram_address;
-        if (dst == 0x800E1B90u || dst == 0x8011C900u ||
-            (rom_off >= 0xD2720u && rom_off < 0x13D1D0u)) {
+        static const bool wcwTrace = getenv("WCW_TRACE") != nullptr;
+        if (wcwTrace && (dst == 0x800E1B90u || dst == 0x8011C900u ||
+            (rom_off >= 0xD2720u && rom_off < 0x13D1D0u))) {
             fprintf(stderr, "[wcw2k][ovl?] unmatched DMA rom=0x%06X -> 0x%08X\n", rom_off, dst);
         }
     }
