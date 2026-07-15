@@ -17,8 +17,9 @@ extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
     // [wcw] running totals every 64 tasks so a stall's task mix is visible late in a run
     {
         static int nGfx = 0, nAud = 0, nAll = 0;
+        static const bool wcwTrace = getenv("WCW_TRACE") != nullptr;
         if (task->t.type == M_GFXTASK) nGfx++; else if (task->t.type == M_AUDTASK) nAud++;
-        if ((nAll++ % 64) == 0) fprintf(stderr, "[wcw][sp] task totals: gfx=%d aud=%d\n", nGfx, nAud);
+        if (wcwTrace && (nAll++ % 64) == 0) fprintf(stderr, "[wcw][sp] task totals: gfx=%d aud=%d\n", nGfx, nAud);
     }
     if (task->t.type == M_GFXTASK) {
         //printf("[sp] Gfx task: %08X\n", (uint32_t)ctx->r4);

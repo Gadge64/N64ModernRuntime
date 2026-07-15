@@ -113,6 +113,13 @@ void dequeue_external_messages(RDRAM_ARG1) {
 // del/s = deliveries; drop/s = orphaned messages expired by the requeue grace window. This is
 // the instrumentation that root-caused the 4-minute in-match slowdown/SFX-loss (see the
 // requeue_grace_ms comment above).
+// [wcw fix] The per-event bring-up diagnostics below (mq/send/frame/recv traces) are
+// opt-in via WCW_TRACE=1 — ungated they land in every user's log file.
+static bool wcw_trace_enabled() {
+    static const bool on = getenv("WCW_TRACE") != nullptr;
+    return on;
+}
+
 void wcw_health_tick() {
     static const bool enabled = getenv("WCW_HEALTH_LOG") != nullptr;
     if (!enabled) {
@@ -209,7 +216,7 @@ extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) ms
     // in thread 6's stack (func_800E2704's saved-s0 slot 0x80083900 receives retrace/
     // task-done message values). Log any queue whose ring buffer lands in that region
     // to identify the creator.
-    if ((uint32_t)msg >= 0x80080000u && (uint32_t)msg < 0x80084000u) {
+    if (wcw_trace_enabled() && (uint32_t)msg >= 0x80080000u && (uint32_t)msg < 0x80084000u) {
         fprintf(stderr, "[wcw2k][mq] osCreateMesgQueue mq=0x%08X BUFFER=0x%08X count=%d (in thread-6 TCB/stack region!)\n",
             (uint32_t)mq_, (uint32_t)msg, count);
     }
@@ -351,8 +358,9 @@ extern "C" s32 osSendMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, s32 flags)
     // [wcw2k] DIAGNOSTIC: sends into thread 6's upper stack frames (the func_800E2704
     // saved-s0 slot 0x80083900 corruption — bringup session 5 part 5). Log the target
     // mq, its ring buffer, and the sender.
-    if (((uint32_t)mq_ >= 0x80083800u && (uint32_t)mq_ < 0x80083A00u) ||
-        ((uint32_t)mq->msg >= 0x80083800u && (uint32_t)mq->msg < 0x80083A00u)) {
+    if (wcw_trace_enabled() &&
+        (((uint32_t)mq_ >= 0x80083800u && (uint32_t)mq_ < 0x80083A00u) ||
+         ((uint32_t)mq->msg >= 0x80083800u && (uint32_t)mq->msg < 0x80083A00u))) {
         fprintf(stderr, "[wcw2k][send] mq=0x%08X buf=0x%08X valid=%d msg=0x%08X sender=0x%08X game=%d\n",
             (uint32_t)mq_, (uint32_t)mq->msg, mq->validCount, (uint32_t)msg,
             ultramodern::is_game_thread() ? (uint32_t)ultramodern::this_thread() : 0,
@@ -370,7 +378,7 @@ extern "C" s32 osSendMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, s32 flags)
 
     // [wcw] DIAGNOSTIC: every frame-ready (send to 0x80040FC0) log the present pointer the game
     // left in 0x80040FFC — nonzero = func_800033A0 present-with-DL, zero = func_800033E8 sync-only.
-    if ((uint32_t)mq_ == 0x80040FC0) {
+    if (wcw_trace_enabled() && (uint32_t)mq_ == 0x80040FC0) {
         static int fn = 0;
         if (fn++ < 80) {
             uint32_t off = 0x40FFC;
@@ -421,9 +429,9 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32 
 
     // [wcw] DIAGNOSTIC: trace recv calls to find where the game thread parks.
     static int rn = 0;
-    if (rn < 80) fprintf(stderr, "[wcw][recv#%d] mq=0x%X block=%d validCount=%d\n", rn, (unsigned)mq_, (int)(flags == OS_MESG_BLOCK), mq ? (int)mq->validCount : -1);
+    if (wcw_trace_enabled() && rn < 80) fprintf(stderr, "[wcw][recv#%d] mq=0x%X block=%d validCount=%d\n", rn, (unsigned)mq_, (int)(flags == OS_MESG_BLOCK), mq ? (int)mq->validCount : -1);
 #ifdef _WIN32
-    if (rn == 0 && flags == OS_MESG_BLOCK) {
+    if (wcw_trace_enabled() && rn == 0 && flags == OS_MESG_BLOCK) {
         void* fr[24]; unsigned short n = RtlCaptureStackBackTrace(0, 24, fr, nullptr);
         HMODULE base = GetModuleHandleW(nullptr);
         fprintf(stderr, "[wcw][recv#0] base=%p frames:", (void*)base);
@@ -439,6 +447,6 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32 
     // Check the queue to see if this thread should swap execution to another.
     ultramodern::check_running_queue(PASS_RDRAM1);
 
-    if (rn <= 80) fprintf(stderr, "[wcw][recv#%d] -> %s\n", rn - 1, received ? "got msg" : "empty");
+    if (wcw_trace_enabled() && rn <= 80) fprintf(stderr, "[wcw][recv#%d] -> %s\n", rn - 1, received ? "got msg" : "empty");
     return received ? 0 : -1;
 }
