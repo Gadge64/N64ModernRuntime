@@ -525,11 +525,20 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 }
             // Determine the action type and act on it
             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
-                // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
-                // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
-                // is finished as well, so sending this early shouldn't be an issue in most cases.
-                // If this causes issues then the logic can be replaced with responding to yield requests.
-                sp_complete();
+                // [wcw fix] sp_complete() used to be signaled HERE, before send_dl — telling the
+                // game the RSP consumed its inputs before RT64 actually read them. On hardware,
+                // SP-done is the license to rewrite RSP inputs, and the AKI engine takes it: its
+                // pose pass rewrites the double-buffered bone matrices as soon as SP-done arrives,
+                // which can race this thread's DL interpretation and feed torn/stale
+                // gSPForceMatrix loads (WWF No Mercy's per-wrestler matrices are the exposed
+                // surface; static-matrix menus are immune). Signal sp_complete() AFTER send_dl
+                // instead — the hardware contract — so inputs are fully ingested before the game
+                // may rewrite them. (The old comment predicted exactly this: "If this causes
+                // issues then the logic can be replaced with responding to yield requests.")
+                // NOTE: this is a correctness hardening of the SP-input contract, NOT the cause
+                // of the No Mercy exploded-wrestler bug — that was a recompiler miscompile
+                // (misplaced self-entry label, fixed by tools/fix_selfentry.py). This reorder is
+                // the defensive other half; kept because the old ordering is simply wrong on HW.
                 ultramodern::measure_input_latency();
 
                 PTR(u64) displaylist = task_action->task.t.data_ptr;
@@ -537,6 +546,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
 
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
                 renderer_context->send_dl(&task_action->task);
+                sp_complete(); // [wcw fix] see above: RSP inputs are consumed only now.
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
                 { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): per-task display-list processing cost on this thread.
                     static const bool wcwDlog = getenv("WCW_PRESENT_LUM") != nullptr;
