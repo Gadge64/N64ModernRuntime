@@ -255,6 +255,16 @@ std::atomic_int wcw_ai_del{0}, wcw_ai_drop{0}, wcw_vi_del{0}, wcw_vi_drop{0};
 std::atomic<int64_t> wcw_ai_maxlat{0}, wcw_vi_maxlat{0};
 
 bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+    // [wcw fix] No Mercy can hand an unrelocated (garbage) queue pointer to an asynchronous send.
+    // Drop such a send, as for a full queue, instead of dereferencing it.
+    if ((uint32_t)mq_ < 0x80000000u || (uint32_t)mq_ >= 0x80800000u) {
+        static int invalidSends = 0;
+        if (invalidSends < 20) {
+            fprintf(stderr, "[wcw fix] do_send: invalid message queue 0x%08X, send dropped\n", (uint32_t)mq_);
+            invalidSends++;
+        }
+        return false;
+    }
     OSMesgQueue* mq = TO_PTR(OSMesgQueue, mq_);
     if (!block) {
         // If non-blocking, fail if the queue is full.
@@ -309,7 +319,11 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
     // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
     PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
     if (!ultramodern::thread_queue_empty(PASS_RDRAM blocked_queue)) {
-        ultramodern::schedule_running_thread(PASS_RDRAM ultramodern::thread_queue_pop(PASS_RDRAM blocked_queue));
+        // [wcw fix] thread_queue_pop returns NULLPTR for a corrupt queue head.
+        PTR(OSThread) popped = ultramodern::thread_queue_pop(PASS_RDRAM blocked_queue);
+        if (popped != NULLPTR) {
+            ultramodern::schedule_running_thread(PASS_RDRAM popped);
+        }
     }
     
     return true;
@@ -345,7 +359,11 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
     // If any threads were blocked on sending to this message queue, pop the first one and schedule it.
     PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_send);
     if (!ultramodern::thread_queue_empty(PASS_RDRAM blocked_queue)) {
-        ultramodern::schedule_running_thread(PASS_RDRAM ultramodern::thread_queue_pop(PASS_RDRAM blocked_queue));
+        // [wcw fix] thread_queue_pop returns NULLPTR for a corrupt queue head.
+        PTR(OSThread) popped = ultramodern::thread_queue_pop(PASS_RDRAM blocked_queue);
+        if (popped != NULLPTR) {
+            ultramodern::schedule_running_thread(PASS_RDRAM popped);
+        }
     }
 
     return true;
