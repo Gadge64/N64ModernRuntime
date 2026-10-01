@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdio>
 
 #include "ultramodern/ultramodern.hpp"
 
@@ -13,9 +14,20 @@ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
 
 void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) toadd_) {
     PTR(OSThread)* cur = queue_to_ptr(PASS_RDRAM queue_);
-    OSThread* toadd = TO_PTR(OSThread, toadd_); 
+    OSThread* toadd = TO_PTR(OSThread, toadd_);
     debug_printf("[Thread Queue] Inserting thread %d into queue 0x%08X\n", toadd->id, (uintptr_t)queue_);
-    while (*cur && TO_PTR(OSThread, *cur)->priority > toadd->priority) {
+    // [wcw fix] Treat an invalid link (corrupt list) as the end of the list instead of following it.
+    while (*cur != NULLPTR) {
+        if ((uint32_t)*cur < 0x80000000u || (uint32_t)*cur >= 0x80800000u) {
+            fprintf(stderr, "[wcw fix] thread_queue_insert: invalid link 0x%08X in queue 0x%08X, truncated\n", (uint32_t)*cur, (uint32_t)queue_);
+            *cur = NULLPTR;
+            break;
+        }
+
+        if (!(TO_PTR(OSThread, *cur)->priority > toadd->priority)) {
+            break;
+        }
+
         cur = &TO_PTR(OSThread, *cur)->next;
     }
     toadd->next = (*cur);
@@ -40,6 +52,12 @@ void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(O
 PTR(OSThread) ultramodern::thread_queue_pop(RDRAM_ARG PTR(PTR(OSThread)) queue_) {
     PTR(OSThread)* queue = queue_to_ptr(PASS_RDRAM queue_);
     PTR(OSThread) ret = *queue;
+    // [wcw fix] A non-null but invalid head (queue never initialised) is treated as empty.
+    if ((uint32_t)ret != 0 && ((uint32_t)ret < 0x80000000u || (uint32_t)ret >= 0x80800000u)) {
+        fprintf(stderr, "[wcw fix] thread_queue_pop: invalid head 0x%08X in queue 0x%08X, dropped\n", (uint32_t)ret, (uint32_t)queue_);
+        *queue = NULLPTR;
+        return NULLPTR;
+    }
     *queue = TO_PTR(OSThread, ret)->next;
     TO_PTR(OSThread, ret)->queue = NULLPTR;
     debug_printf("[Thread Queue] Popped thread %d from queue 0x%08X\n", TO_PTR(OSThread, ret)->id, (uintptr_t)queue_);

@@ -95,7 +95,8 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
             throw std::runtime_error("Invalid thread priority!");
             break;
     }
-    // SetThreadPriority(GetCurrentThread(), nPriority);
+    // [wcw fix] Apply the priority (this call was commented out, so it was computed but never set).
+    SetThreadPriority(GetCurrentThread(), nPriority);
 }
 #elif defined(__linux__)
 #include <sys/prctl.h>
