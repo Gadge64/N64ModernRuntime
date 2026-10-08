@@ -41,6 +41,8 @@ void init_thread_cleanup();
 // Saving
 void change_save_file(const std::u8string& subfolder, const std::u8string& name);
 std::filesystem::path get_save_file_path();
+// Subfolder of saves/ used when the game starts (e.g. a mod profile's own save). Empty = saves/ itself.
+void set_initial_save_subfolder(const std::u8string& subfolder);
 
 // Thread queues.
 constexpr PTR(PTR(OSThread)) running_queue = (PTR(PTR(OSThread)))-1;

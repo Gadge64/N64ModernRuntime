@@ -272,8 +272,14 @@ void read_save_file() {
     }
 }
 
+static std::u8string initial_save_subfolder;
+
+void ultramodern::set_initial_save_subfolder(const std::u8string& subfolder) {
+    initial_save_subfolder = subfolder;
+}
+
 void ultramodern::init_saving(RDRAM_ARG1) {
-    set_save_file_path(u8"", recomp::current_game_id());
+    set_save_file_path(initial_save_subfolder, recomp::current_game_id());
 
     save_context.save_buffer.resize(get_save_size(recomp::get_save_type()));
 

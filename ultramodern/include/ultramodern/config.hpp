@@ -76,6 +76,11 @@ namespace ultramodern {
             HighPrecisionFramebuffer hpfb_option;
             int rr_manual_value;
             int ds_option;
+            // [wcw] Output resolution (window client size / fullscreen display mode). 0x0 = desktop.
+            int output_width = 0;
+            int output_height = 0;
+            // [wcw] Fullscreen refresh rate in Hz. 0 = keep the desktop's.
+            int output_refresh = 0;
 
             virtual ~GraphicsConfig() = default;
 
