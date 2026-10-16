@@ -47,6 +47,8 @@ extern uint64_t total_vis;
 extern "C" void wait_one_frame(uint8_t* rdram, recomp_context* ctx) {
     uint64_t cur_vis = total_vis;
     while (cur_vis == total_vis) {
+        // [wcw fix] The VI thread is gone after quit(); park instead of spinning on it (aki-roadmap#3).
+        ultramodern::park_game_thread_if_quitting();
         std::this_thread::yield();
     }
 }

@@ -37,6 +37,26 @@ thread_local bool is_main_thread = false;
 thread_local bool is_game_thread = false;
 thread_local PTR(OSThread) thread_self = NULLPTR;
 
+// [wcw fix] Shutdown ordering (aki-roadmap#3). recomp::start used to release rdram while game
+// threads were still alive: the one running kept running, and the idle thread kept cycling
+// undeliverable external messages through do_send, which reads the target queue in rdram — an
+// access violation at rdram+<queue>+8 (validCount) when quitting mid-match. Now a game thread
+// that reaches a scheduler point after quit() parks there for good, and rdram is only released
+// once every live game thread has parked. Parked threads end with the process.
+extern std::atomic_bool exited;
+static std::atomic_int live_game_threads{0};
+static std::atomic_int parked_game_threads{0};
+
+void ultramodern::park_game_thread_if_quitting() {
+    if (!is_game_thread || !exited.load()) {
+        return;
+    }
+    parked_game_threads.fetch_add(1);
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::hours(1));
+    }
+}
+
 void ultramodern::set_main_thread() {
     ::is_game_thread = true;
     is_main_thread = true;
@@ -156,6 +176,8 @@ static UltraThreadContext* wcw2k_get_context_host(RDRAM_ARG OSThread* t);
 
 void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
     thread_context->running.wait();
+    ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads
+
     // If this thread's context was replaced by another thread or deleted, destroy it again from its own context.
     // This will trigger thread cleanup instead.
     // [wcw2k] compare through the repairing accessor so a game-wiped (but live)
@@ -523,6 +545,7 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
     fprintf(stderr, "[wcw][thread] id=%d entry=0x%08X pri=%d struct=0x%08X sp=0x%08X\n", self->id, (unsigned)(uint32_t)entrypoint, self->priority, (uint32_t)self_, (uint32_t)self->sp);
     thread_self = self_;
     is_game_thread = true;
+    live_game_threads.fetch_add(1); // [wcw fix] see park_game_threads
 
     // Set the thread name
     ultramodern::set_native_thread_name(ultramodern::threads::get_game_thread_name(self));
@@ -564,6 +587,7 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
     }
 
     // Dispose of this thread now that it's completed or terminated.
+    live_game_threads.fetch_sub(1); // [wcw fix] see park_game_threads
     ultramodern::cleanup_thread(thread_context);
 }
 
@@ -719,4 +743,36 @@ void ultramodern::cleanup_thread(UltraThreadContext *cur_context) {
 
 void ultramodern::join_thread_cleaner_thread() {
     thread_cleaner_thread.join();
+}
+
+// [wcw fix] Called after quit(). Running game threads park at their next OS call; blocked ones
+// are woken here (their context's running semaphore, and the external message queue for the idle
+// thread) so they reach the park check in wait_for_resumed / wait_for_external_message. A thread
+// that never makes another OS call (a pure busy loop) can't be stopped: then this times out and
+// the caller must keep rdram mapped.
+bool ultramodern::park_game_threads(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        {
+            std::lock_guard lock{wcw2k_context_map_mutex};
+            for (auto& [thread, record] : wcw2k_context_map) {
+                if (record.context != nullptr) {
+                    record.context->running.signal();
+                }
+            }
+        }
+        ultramodern::wake_external_message_waiters(live_game_threads.load());
+
+        int live = live_game_threads.load();
+        int parked = parked_game_threads.load();
+        if (parked >= live) {
+            fprintf(stderr, "[wcw] shutdown: %d game threads stopped\n", parked);
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            fprintf(stderr, "[wcw] shutdown: %d of %d game threads stopped; keeping rdram mapped\n", parked, live);
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }

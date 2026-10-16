@@ -22,6 +22,7 @@ void swap_to_thread(RDRAM_ARG OSThread *to) {
 }
 
 void ultramodern::check_running_queue(RDRAM_ARG1) {
+    ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads in threads.cpp
     // [wcw2k] a starvation-valve-boosted thread keeps the CPU for its boost window
     // (see wcw2k_pop_starved in threads.cpp) — skipping the priority preemption here
     // is what lets it do a frame of work instead of one OS call per valve fire.

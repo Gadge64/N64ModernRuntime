@@ -301,6 +301,18 @@ void ultramodern::change_save_file(const std::u8string& subfolder, const std::u8
 void ultramodern::join_saving_thread() {
     if (save_context.saving_thread.joinable()) {
         save_context.saving_thread.join();
+
+        // [wcw fix] The saving thread stops as soon as quit() is called, but game threads could
+        // still write the save until they park (aki-roadmap#3). recomp::start joins this after
+        // parking them, so flush any write that came in after the saving thread's last pass.
+        bool save_buffer_updated = false;
+        while (save_context.write_sempahore.tryWait()) {
+            save_buffer_updated = true;
+        }
+        if (save_buffer_updated) {
+            fprintf(stderr, "[wcw] shutdown: flushing save writes made after quit\n");
+            update_save_file();
+        }
     }
 }
 

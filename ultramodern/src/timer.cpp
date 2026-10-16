@@ -37,7 +37,11 @@ struct RemoveTimerAction {
     PTR(OSTimer) timer;
 };
 
-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
+// [wcw fix] Ends the timer thread at shutdown (aki-roadmap#3): it reads OSTimers in rdram, so it
+// has to stop before rdram is released. It used to be detached and run forever.
+struct ExitTimerAction {};
+
+using Action = std::variant<AddTimerAction, RemoveTimerAction, ExitTimerAction>;
 
 struct {
     std::thread thread;
@@ -87,6 +91,8 @@ void timer_thread(RDRAM_ARG1) {
     // Ordered set of timers that are currently active
     std::set<PTR(OSTimer), decltype(timer_sort)> active_timers{timer_sort};
     
+    bool exit_requested = false;
+
     // Lambda to process a timer action to handle adding and removing timers
     auto process_timer_action = [&](const Action& action) {
         // Determine the action type and act on it
@@ -94,6 +100,8 @@ void timer_thread(RDRAM_ARG1) {
             active_timers.insert(add_action->timer);
         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
             active_timers.erase(remove_action->timer);
+        } else if (std::get_if<ExitTimerAction>(&action)) {
+            exit_requested = true;
         }
     };
 
@@ -105,9 +113,13 @@ void timer_thread(RDRAM_ARG1) {
         }
 
         // If there's no timer to act on, wait for one to come in from the action queue
-        while (active_timers.empty()) {
+        while (active_timers.empty() && !exit_requested) {
             timer_context.action_queue.wait_dequeue(cur_action);
             process_timer_action(cur_action);
+        }
+
+        if (exit_requested) {
+            return;
         }
 
         // Get the timer that's closest to running out
@@ -127,6 +139,9 @@ void timer_thread(RDRAM_ARG1) {
             active_timers.insert(cur_timer_);
             // Process the new action
             process_timer_action(cur_action);
+            if (exit_requested) {
+                return;
+            }
         }
         else {
             // Waiting for the timer completed, so send the timer's message to its message queue
@@ -142,7 +157,13 @@ void timer_thread(RDRAM_ARG1) {
 
 void ultramodern::init_timers(RDRAM_ARG1) {
     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
-    timer_context.thread.detach();
+}
+
+void ultramodern::join_timer_thread() {
+    if (timer_context.thread.joinable()) {
+        timer_context.action_queue.enqueue(ExitTimerAction{});
+        timer_context.thread.join();
+    }
 }
 
 uint32_t ultramodern::get_speed_multiplier() {

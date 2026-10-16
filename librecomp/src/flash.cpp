@@ -153,8 +153,11 @@ extern "C" void osFlashWriteBuffer_recomp(uint8_t * rdram, recomp_context * ctx)
         write_buffer[i] = MEM_B(i, dramAddr);
     }
 
-    // Send the message indicating write completion
-    ultramodern::enqueue_external_message(mq, 0, false, true);
+    // Send the message indicating write completion. [wcw fix] Post it directly with osSendMesg (flash
+    // calls always come from a game thread) instead of as an external message. With the external message,
+    // No Mercy's flash loader (thousands of single-page reads at boot) sometimes judged a valid save corrupt
+    // and offered to initialise it, and settings changes were not saved.
+    osSendMesg(PASS_RDRAM mq, 0, OS_MESG_NOBLOCK);
 
     ctx->r2 = 0;
 }
@@ -192,8 +195,8 @@ extern "C" void osFlashReadArray_recomp(uint8_t * rdram, recomp_context * ctx) {
     // Read from the save file into the provided buffer
     save_read(PASS_RDRAM dramAddr, offset, count);
 
-    // Send the message indicating read completion
-    ultramodern::enqueue_external_message(mq, 0, false, true);
+    // Send the message indicating read completion (directly, see osFlashWriteBuffer_recomp)
+    osSendMesg(PASS_RDRAM mq, 0, OS_MESG_NOBLOCK);
 
     ctx->r2 = 0;
 }

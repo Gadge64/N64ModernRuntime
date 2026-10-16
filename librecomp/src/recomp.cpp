@@ -900,10 +900,21 @@ void recomp::start(
     graphics_shutdown_ready.signal();
 
     game_thread.join();
+    // [wcw fix] Shutdown ordering (aki-roadmap#3): stop everything that reads rdram before
+    // releasing it. Game threads park first (their last save writes land before the final
+    // flush in join_saving_thread), then the host threads that serve them stop.
+    bool game_threads_parked = ultramodern::park_game_threads(std::chrono::milliseconds{2000});
     ultramodern::join_event_threads();
+    ultramodern::join_timer_thread();
     ultramodern::join_thread_cleaner_thread();
     ultramodern::join_saving_thread();
-    
+
+    if (!game_threads_parked) {
+        // A game thread is still running and may read rdram; leave it mapped for the OS to
+        // reclaim at process exit.
+        return;
+    }
+
     // Free rdram.
     bool free_failed;
 #ifdef _WIN32

@@ -46,6 +46,14 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
     external_messages.enqueue({mq, msg, jam, requeue_if_blocked, wcw_steady_ms()});
 }
 
+// [wcw fix] Shutdown (aki-roadmap#3): wake threads blocked in wait_for_external_message so they
+// reach its park check. The null-queue messages are never delivered: every consumer parks first.
+void ultramodern::wake_external_message_waiters(int count) {
+    for (int i = 0; i < count; i++) {
+        external_messages.enqueue({NULLPTR, NULLPTR, false, false, wcw_steady_ms()});
+    }
+}
+
 bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
 
 // [wcw] DIAGNOSTIC counters for the 1/s [wcw][health] line: requeue churn (undeliverable
@@ -80,6 +88,7 @@ static void wcw2k_note_delivery(PTR(OSMesgQueue) mq, OSMesg msg) {
 }
 
 void dequeue_external_messages(RDRAM_ARG1) {
+    ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads
     QueuedMessage to_send;
     std::vector<QueuedMessage> requeued_messages{};
     int64_t now_ms = wcw_steady_ms();
@@ -168,6 +177,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
     requeued_messages.clear();
     bool delivered_any = false;
     external_messages.wait_dequeue(to_send);
+    ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads
     int64_t now_ms = wcw_steady_ms();
     do {
         if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
@@ -198,6 +208,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
 void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
     QueuedMessage to_send;
     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+        ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads
         if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
             // [wcw fix] Same grace-window drop as dequeue_external_messages above.
             if (wcw_steady_ms() - to_send.enqueue_ms <= requeue_grace_ms) {

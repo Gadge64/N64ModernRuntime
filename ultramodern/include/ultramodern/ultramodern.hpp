@@ -143,6 +143,15 @@ void quit();
 void join_event_threads();
 void join_thread_cleaner_thread();
 void join_saving_thread();
+// [wcw fix] Shutdown ordering (aki-roadmap#3). After quit(), game threads stop at their next
+// scheduler point instead of running on; park_game_threads wakes the blocked ones so they get
+// there too, and returns whether every game thread stopped within the timeout. rdram may only
+// be released when it returns true. join_timer_thread stops the timer thread, which reads
+// OSTimers in rdram.
+void park_game_thread_if_quitting();
+bool park_game_threads(std::chrono::milliseconds timeout);
+void wake_external_message_waiters(int count);
+void join_timer_thread();
 
 void set_audio_callbacks(const audio_callbacks_t& callbacks);
 
